@@ -10,6 +10,7 @@ import (
 
 	"waterwheel-monitor/internal/config"
 	"waterwheel-monitor/internal/database"
+	"waterwheel-monitor/internal/metrics"
 	"waterwheel-monitor/internal/models"
 	"waterwheel-monitor/internal/pipeline"
 )
@@ -84,7 +85,10 @@ func (so *ShapeOptimizer) worker(ctx context.Context, id int) {
 				log.Printf("[Shape Optimizer] Worker %d: OptimizeReqCh closed", id)
 				return
 			}
+			start := time.Now()
 			result := so.Optimize(req.Wheel, req.Data)
+			metrics.ObserveOptimizationDuration(time.Since(start))
+			metrics.IncOptimization()
 			if err := so.db.InsertOptimizationResult(context.Background(), result); err != nil {
 				log.Printf("[Shape Optimizer] DB insert error (wheel=%d): %v", req.Wheel.ID, err)
 			}
