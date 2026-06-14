@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """
-古代筒车遥测数据模拟器
-模拟10座筒车每5分钟通过4G DTU上报遥测数据
+古代筒车遥测数据模拟器 - 多模式版本
+支持5种仿真模式：realistic / flood / drought / failure / storm
 """
 
 import json
 import math
+import os
 import random
+import sys
 import time
 from datetime import datetime
 from urllib import request, error
 
-API_BASE = "http://localhost:8080/api"
-INTERVAL_SECONDS = 300
+API_BASE = os.environ.get("API_BASE_URL", "http://localhost:8080/api")
+INTERVAL_SECONDS = int(os.environ.get("REPORT_INTERVAL_SECONDS", "300"))
+SIMULATION_MODE = os.environ.get("SIMULATION_MODE", "realistic").lower()
+WHEEL_COUNT = int(os.environ.get("WHEEL_COUNT", "10"))
+WATER_FLOW_BASE = float(os.environ.get("WATER_FLOW_BASE", "1.5"))
+ROTATION_SPEED_BASE = float(os.environ.get("ROTATION_SPEED_BASE", "8.0"))
 
 WATERWHEEL_CONFIGS = [
     {"id": 1,  "name": "筒车一号", "base_rpm": 2.8, "base_drop": 2.1, "base_flow": 1.8, "capacity": 120.0},
@@ -28,32 +34,91 @@ WATERWHEEL_CONFIGS = [
 ]
 
 
+def apply_mode_factors(base_flow, base_rpm, base_drop, tick):
+    """根据仿真模式调整水流、转速、落差基准值"""
+    flow_factor = 1.0
+    rpm_factor = 1.0
+    drop_factor = 1.0
+
+    day_phase = (tick * INTERVAL_SECONDS) % 86400 / 86400.0
+    daily_curve = 0.85 + 0.3 * math.sin(2 * math.pi * (day_phase - 0.25))
+
+    if SIMULATION_MODE == "realistic":
+        flow_factor = daily_curve
+        rpm_factor = daily_curve
+        drop_factor = daily_curve
+
+    elif SIMULATION_MODE == "flood":
+        flood_level = 1.6 + 0.3 * math.sin(tick * 0.05)
+        flow_factor = flood_level
+        rpm_factor = 1.25 + 0.2 * math.sin(tick * 0.05)
+        drop_factor = 1.4 + 0.2 * math.sin(tick * 0.05 + 0.3)
+
+    elif SIMULATION_MODE == "drought":
+        drought_level = 0.45 + 0.1 * math.sin(tick * 0.02)
+        flow_factor = drought_level
+        rpm_factor = 0.6 + 0.1 * math.sin(tick * 0.02)
+        drop_factor = 0.6 + 0.08 * math.sin(tick * 0.02 + 0.5)
+
+    elif SIMULATION_MODE == "failure":
+        wear = min(1.0, tick * INTERVAL_SECONDS / (3600 * 24 * 30))
+        rpm_factor = 1.0 - 0.45 * wear
+        flow_factor = daily_curve * (1.0 - 0.1 * wear)
+        drop_factor = daily_curve
+        if random.random() < 0.02 * wear:
+            rpm_factor *= 0.6
+
+    elif SIMULATION_MODE == "storm":
+        storm_cycle = math.sin(tick * 0.1)
+        if storm_cycle > 0.7:
+            flow_factor = 2.0 + random.gauss(0, 0.3)
+            rpm_factor = 1.5 + random.gauss(0, 0.2)
+            drop_factor = 1.8 + random.gauss(0, 0.2)
+        elif storm_cycle > 0:
+            flow_factor = 1.2 + 0.8 * storm_cycle
+            rpm_factor = 1.1 + 0.4 * storm_cycle
+            drop_factor = 1.1 + 0.7 * storm_cycle
+        else:
+            flow_factor = 0.8 + 0.2 * storm_cycle
+            rpm_factor = 0.9 + 0.1 * storm_cycle
+            drop_factor = 0.85 + 0.15 * storm_cycle
+
+    flow_noise = random.gauss(0, 0.03)
+    rpm_noise = random.gauss(0, 0.04)
+    drop_noise = random.gauss(0, 0.02)
+
+    return (
+        base_flow * flow_factor * (1 + flow_noise),
+        base_rpm * rpm_factor * (1 + rpm_noise),
+        base_drop * drop_factor * (1 + drop_noise),
+    )
+
+
 def generate_telemetry(wheel_cfg, tick):
-    phase = tick / 12.0
+    base_flow = wheel_cfg["base_flow"] * WATER_FLOW_BASE / 1.5
+    base_rpm = wheel_cfg["base_rpm"] * ROTATION_SPEED_BASE / 2.8
+    base_drop = wheel_cfg["base_drop"]
 
-    rpm_factor = 1 + 0.15 * math.sin(phase) + random.gauss(0, 0.05)
-    drop_factor = 1 + 0.1 * math.sin(phase + 0.5) + random.gauss(0, 0.03)
-    flow_factor = 1 + 0.12 * math.sin(phase + 1.0) + random.gauss(0, 0.04)
+    flow_velocity, rotation_speed, water_level_drop = apply_mode_factors(
+        base_flow, base_rpm, base_drop, tick
+    )
 
-    rotation_speed = max(0.5, wheel_cfg["base_rpm"] * rpm_factor)
-    water_level_drop = max(0.5, wheel_cfg["base_drop"] * drop_factor)
-    flow_velocity = max(0.3, wheel_cfg["base_flow"] * flow_factor)
+    flow_velocity = max(0.2, flow_velocity)
+    rotation_speed = max(0.3, rotation_speed)
+    water_level_drop = max(0.3, water_level_drop)
 
     bucket_count = 24 if wheel_cfg["id"] in [1, 4, 7, 9] else (20 if wheel_cfg["id"] in [2, 5, 8] else 18)
     bucket_capacity = 0.08 if wheel_cfg["id"] in [1, 4, 7, 9] else (0.06 if wheel_cfg["id"] in [2, 5, 8, 10] else 0.05)
-    diameter = 8.5 if wheel_cfg["id"] in [1, 4, 7, 9] else (7.5 if wheel_cfg["id"] in [2, 5, 8] else 6.8)
 
-    fill_efficiency = 0.35 + 0.1 * math.sin(phase + 0.3)
-    volume_per_rotation = bucket_count * fill_efficiency * bucket_capacity
+    fill_ratio = min(1.0, flow_velocity / 2.5)
+    fill_eff = 0.2 + 0.7 * (1 - math.exp(-fill_ratio / 0.3))
+
+    volume_per_rotation = bucket_count * fill_eff * bucket_capacity
     water_lift = min(volume_per_rotation * rotation_speed * 60.0, wheel_cfg["capacity"])
 
-    low_eff_chance = 0.0
-    if tick % 100 == wheel_cfg["id"]:
-        low_eff_chance = 1.0
-
-    if random.random() < low_eff_chance:
-        rotation_speed *= 0.5
-        water_lift *= 0.4
+    if random.random() < 0.005:
+        rotation_speed *= random.uniform(0.5, 0.75)
+        water_lift *= random.uniform(0.4, 0.65)
 
     return {
         "waterwheel_id": wheel_cfg["id"],
@@ -83,53 +148,82 @@ def send_telemetry(data):
         return False, f"HTTP {e.code}: {e.read().decode('utf-8')}"
 
 
-def seed_historical_data():
-    print("正在注入历史数据...")
+def seed_historical_data(hours=24):
+    print(f"正在注入 {hours} 小时历史数据...")
     now = time.time()
-    for hours_ago in range(24, 0, -1):
+    count = 0
+    for hours_ago in range(hours, 0, -1):
         tick = int((now - hours_ago * 3600) / INTERVAL_SECONDS)
-        for wheel in WATERWHEEL_CONFIGS:
+        for wheel in WATERWHEEL_CONFIGS[:WHEEL_COUNT]:
             data = generate_telemetry(wheel, tick)
             data["time"] = datetime.utcfromtimestamp(now - hours_ago * 3600).isoformat() + "Z"
             ok, resp = send_telemetry(data)
-            if not ok:
+            if ok:
+                count += 1
+            else:
                 print(f"  注入失败 {wheel['name']}: {resp}")
-    print("历史数据注入完成")
+    print(f"历史数据注入完成，共 {count} 条")
 
 
 def run_continuous():
-    print(f"筒车遥测模拟器启动，上报间隔 {INTERVAL_SECONDS} 秒")
-    print(f"目标API: {API_BASE}")
+    print(f"筒车遥测模拟器启动")
+    print(f"  模式: {SIMULATION_MODE}")
+    print(f"  上报间隔: {INTERVAL_SECONDS} 秒")
+    print(f"  筒车数量: {WHEEL_COUNT}")
+    print(f"  目标API: {API_BASE}")
     print("=" * 60)
 
     tick = int(time.time() / INTERVAL_SECONDS)
+    fail_count = 0
 
     while True:
-        print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 上报周期 #{tick}")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n[{ts}] 上报周期 #{tick} (模式:{SIMULATION_MODE})")
 
-        for wheel in WATERWHEEL_CONFIGS:
+        success_count = 0
+        for wheel in WATERWHEEL_CONFIGS[:WHEEL_COUNT]:
             data = generate_telemetry(wheel, tick)
             ok, resp = send_telemetry(data)
-            status = "✓" if ok else "✗"
-            mech = resp.get("mechanical_efficiency") if ok and isinstance(resp, dict) else None
-            hyd = resp.get("hydraulic_efficiency") if ok and isinstance(resp, dict) else None
-            eff_str = ""
-            if mech is not None and hyd is not None:
-                eff_str = f" [效率={mech*hyd*100:.1f}%]"
-            print(f"  {status} {wheel['name']}: rpm={data['rotation_speed']:.2f} lift={data['water_lift']:.1f}m³/h{eff_str}")
+            if ok:
+                success_count += 1
+                status = "✓"
+            else:
+                fail_count += 1
+                status = "✗"
+            print(f"  {status} {wheel['name']}: rpm={data['rotation_speed']:.2f} flow={data['flow_velocity']:.2f}m/s lift={data['water_lift']:.1f}m³/h")
+
+        if success_count == WHEEL_COUNT:
+            fail_count = 0
 
         tick += 1
         next_time = tick * INTERVAL_SECONDS
         sleep_secs = max(1, next_time - time.time())
-        print(f"  下次上报: {sleep_secs:.0f} 秒后")
+        print(f"  成功 {success_count}/{WHEEL_COUNT}，下次上报 {sleep_secs:.0f}s 后")
         time.sleep(sleep_secs)
 
 
-if __name__ == "__main__":
-    import sys
+def wait_for_backend(max_wait=120):
+    print(f"等待后端服务就绪 ({API_BASE})...")
+    start = time.time()
+    while time.time() - start < max_wait:
+        try:
+            req = request.Request(f"{API_BASE}/health", method="GET")
+            with request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    print("后端服务就绪")
+                    return True
+        except Exception:
+            pass
+        time.sleep(2)
+    print(f"警告：{max_wait}s 内后端未就绪，仍继续尝试")
+    return False
 
-    if "--seed" in sys.argv:
-        seed_historical_data()
+
+if __name__ == "__main__":
+    wait_for_backend()
+
+    if "--seed" in sys.argv or os.environ.get("SEED_HISTORICAL", "0") == "1":
+        seed_historical_data(int(os.environ.get("SEED_HOURS", "24")))
 
     try:
         run_continuous()
