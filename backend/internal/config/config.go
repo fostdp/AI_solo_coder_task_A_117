@@ -16,8 +16,11 @@ type Config struct {
 	DBName                   string
 	ServerPort               string
 	MQTTBroker               string
-	MQTTClientID            string
-	MQTTTopic               string
+	MQTTClientID             string
+	MQTTUsername             string
+	MQTTPassword             string
+	MQTTTopicPrefix          string
+	MQTTTopic                string
 	EfficiencyAlertThreshold float64
 }
 
@@ -37,8 +40,11 @@ func Load() (*Config, error) {
 		DBName:                   getEnv("DB_NAME", "waterwheel"),
 		ServerPort:               getEnv("SERVER_PORT", "8080"),
 		MQTTBroker:               getEnv("MQTT_BROKER", "tcp://localhost:1883"),
-		MQTTClientID:            getEnv("MQTT_CLIENT_ID", "waterwheel-alert"),
-		MQTTTopic:               getEnv("MQTT_TOPIC", "waterwheel/alerts"),
+		MQTTClientID:             getEnv("MQTT_CLIENT_ID", "waterwheel-alert"),
+		MQTTUsername:             getEnv("MQTT_USERNAME", ""),
+		MQTTPassword:             getEnv("MQTT_PASSWORD", ""),
+		MQTTTopicPrefix:          getEnv("MQTT_TOPIC_PREFIX", "waterwheel/"),
+		MQTTTopic:                getEnv("MQTT_TOPIC", "waterwheel/alerts"),
 		EfficiencyAlertThreshold: threshold,
 	}, nil
 }
