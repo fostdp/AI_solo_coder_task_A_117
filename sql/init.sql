@@ -68,6 +68,34 @@ CREATE TABLE IF NOT EXISTS efficiency_history (
 
 SELECT create_hypertable('efficiency_history', 'time', if_not_exists => TRUE);
 
+ALTER TABLE telemetry_data SET (
+  timescaledb.compress,
+  timescaledb.compress_orderby = 'time DESC',
+  timescaledb.compress_segmentby = 'waterwheel_id'
+);
+
+ALTER TABLE efficiency_history SET (
+  timescaledb.compress,
+  timescaledb.compress_orderby = 'time DESC',
+  timescaledb.compress_segmentby = 'waterwheel_id'
+);
+
+SELECT add_compression_policy('telemetry_data', INTERVAL '7 days', if_not_exists => TRUE);
+SELECT add_compression_policy('efficiency_history', INTERVAL '30 days', if_not_exists => TRUE);
+
+SELECT add_retention_policy('telemetry_data', INTERVAL '365 days', if_not_exists => TRUE);
+SELECT add_retention_policy('efficiency_history', INTERVAL '730 days', if_not_exists => TRUE);
+
+SELECT add_continuous_aggregate_policy('efficiency_history_cagg',
+  start_offset => INTERVAL '3 days',
+  end_offset   => INTERVAL '1 hour',
+  schedule_interval => INTERVAL '1 hour',
+  if_not_exists => TRUE
+) WHERE EXISTS (
+  SELECT 1 FROM timescaledb_information.continuous_aggregates
+  WHERE view_name = 'efficiency_history_cagg'
+);
+
 INSERT INTO waterwheels (name, location, diameter, bucket_count, bucket_capacity, max_flow_rate) VALUES
 ('筒车一号', '四川成都都江堰', 8.5, 24, 0.08, 120.0),
 ('筒车二号', '陕西西安沣惠渠', 7.2, 20, 0.06, 95.0),
