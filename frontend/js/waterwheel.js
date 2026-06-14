@@ -7,11 +7,16 @@ class WaterwheelRenderer {
         this.angle = 0;
         this.running = true;
         this.speedMultiplier = 1;
-        this.particles = [];
-        this.waterDrops = [];
+        this.particleData = new Float32Array(0);
+        this.particleCount = 0;
+        this.dropData = new Float32Array(0);
+        this.dropCount = 0;
         this.lastTime = 0;
         this.onClick = null;
         this.hoveredBucket = -1;
+        this.useWorker = typeof Worker !== 'undefined';
+        this.particleWorker = null;
+        this._workerReady = false;
 
         this.resize();
         window.addEventListener('resize', () => this.resize());
@@ -30,6 +35,13 @@ class WaterwheelRenderer {
         this.ctx.scale(dpr, dpr);
         this.viewWidth = rect.width;
         this.viewHeight = 500;
+
+        if (this.particleWorker && this._workerReady) {
+            this.particleWorker.postMessage({
+                type: 'config',
+                config: { width: this.viewWidth, height: this.viewHeight }
+            });
+        }
     }
 
     setWaterwheel(wheel) {
@@ -50,13 +62,41 @@ class WaterwheelRenderer {
     }
 
     initParticles() {
-        this.particles = [];
-        for (let i = 0; i < 80; i++) {
-            this.particles.push(this.createParticle());
+        if (this.useWorker) {
+            try {
+                this.particleWorker = new Worker('js/particle-worker.js');
+                this.particleWorker.onmessage = (e) => this._onWorkerMessage(e);
+                this.particleWorker.postMessage({
+                    type: 'init',
+                    config: {
+                        count: 120,
+                        width: this.viewWidth,
+                        height: this.viewHeight,
+                        waterY: 0.75,
+                        waterHeight: 0.22,
+                        flowSpeed: 1.0,
+                    }
+                });
+                this._workerReady = true;
+            } catch (e) {
+                console.warn('Web Worker 启动失败，回退到主线程模式', e);
+                this.useWorker = false;
+                this._initFallbackParticles();
+            }
+        } else {
+            this._initFallbackParticles();
         }
     }
 
-    createParticle() {
+    _initFallbackParticles() {
+        this._fallbackParticles = [];
+        this._fallbackDrops = [];
+        for (let i = 0; i < 80; i++) {
+            this._fallbackParticles.push(this._createParticle());
+        }
+    }
+
+    _createParticle() {
         return {
             x: Math.random() * this.viewWidth,
             y: this.viewHeight * 0.72 + Math.random() * (this.viewHeight * 0.25),
@@ -65,6 +105,16 @@ class WaterwheelRenderer {
             size: 1 + Math.random() * 3,
             alpha: 0.3 + Math.random() * 0.5,
         };
+    }
+
+    _onWorkerMessage(e) {
+        const msg = e.data;
+        if (msg.type === 'particles') {
+            this.particleData = new Float32Array(msg.particles);
+            this.particleCount = msg.particleCount;
+            this.dropData = new Float32Array(msg.drops);
+            this.dropCount = msg.dropCount;
+        }
     }
 
     handleClick(e) {
@@ -116,39 +166,51 @@ class WaterwheelRenderer {
             this.angle += (rpm * 2 * Math.PI / 60) * deltaTime * this.speedMultiplier;
         }
 
-        this.updateParticles(deltaTime);
-        this.updateWaterDrops(deltaTime);
+        this._updateParticles(deltaTime);
         this.draw();
 
         requestAnimationFrame((t) => this.animate(t));
     }
 
-    updateParticles(dt) {
-        for (const p of this.particles) {
+    _updateParticles(dt) {
+        if (this.useWorker && this._workerReady) {
+            this.particleWorker.postMessage({ type: 'update', dt: dt });
+        } else {
+            this._updateFallbackParticles(dt);
+        }
+    }
+
+    _updateFallbackParticles(dt) {
+        const parts = this._fallbackParticles;
+        const waterY = this.viewHeight * 0.75;
+        for (let i = 0; i < parts.length; i++) {
+            const p = parts[i];
             p.x += p.vx * dt * 60;
             p.y += p.vy * dt * 60;
 
             if (p.x > this.viewWidth + 10) {
                 p.x = -10;
-                p.y = this.viewHeight * 0.72 + Math.random() * (this.viewHeight * 0.25);
+                p.y = waterY + Math.random() * (this.viewHeight * 0.22);
             }
-            if (p.y < this.viewHeight * 0.7) {
-                p.y = this.viewHeight * 0.72;
+            if (p.y < waterY - 5) {
+                p.y = waterY + 2;
             }
             if (p.y > this.viewHeight - 5) {
                 p.y = this.viewHeight - 10;
             }
         }
-    }
 
-    updateWaterDrops(dt) {
-        this.waterDrops = this.waterDrops.filter(d => {
+        const drops = this._fallbackDrops;
+        for (let i = drops.length - 1; i >= 0; i--) {
+            const d = drops[i];
             d.x += d.vx * dt * 60;
             d.y += d.vy * dt * 60;
             d.vy += 0.15 * dt * 60;
             d.life -= dt;
-            return d.life > 0 && d.y < this.viewHeight;
-        });
+            if (d.life <= 0 || d.y > this.viewHeight) {
+                drops.splice(i, 1);
+            }
+        }
     }
 
     draw() {
@@ -234,11 +296,30 @@ class WaterwheelRenderer {
     }
 
     drawWaterParticles() {
-        for (const p of this.particles) {
-            this.ctx.fillStyle = `rgba(129, 212, 250, ${p.alpha})`;
-            this.ctx.beginPath();
-            this.ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-            this.ctx.fill();
+        const ctx = this.ctx;
+        if (this.useWorker) {
+            const data = this.particleData;
+            const count = this.particleCount;
+            for (let i = 0; i < count; i++) {
+                const o = i * 6;
+                const x = data[o];
+                const y = data[o + 1];
+                const size = data[o + 4];
+                const alpha = data[o + 5];
+                ctx.fillStyle = `rgba(129, 212, 250, ${alpha})`;
+                ctx.beginPath();
+                ctx.arc(x, y, size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        } else {
+            const parts = this._fallbackParticles;
+            for (let i = 0; i < parts.length; i++) {
+                const p = parts[i];
+                ctx.fillStyle = `rgba(129, 212, 250, ${p.alpha})`;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
         }
     }
 
@@ -473,25 +554,49 @@ class WaterwheelRenderer {
     }
 
     addWaterDrop(x, y) {
-        for (let i = 0; i < 2; i++) {
-            this.waterDrops.push({
-                x: x + (Math.random() - 0.5) * 8,
-                y: y,
-                vx: (Math.random() - 0.5) * 1,
-                vy: 1 + Math.random(),
-                size: 2 + Math.random() * 3,
-                life: 1.5,
-            });
+        if (this.useWorker && this._workerReady) {
+            this.particleWorker.postMessage({ type: 'addDrops', x: x, y: y, count: 2 });
+        } else {
+            for (let i = 0; i < 2; i++) {
+                this._fallbackDrops.push({
+                    x: x + (Math.random() - 0.5) * 8,
+                    y: y,
+                    vx: (Math.random() - 0.5) * 1,
+                    vy: 1 + Math.random(),
+                    size: 2 + Math.random() * 3,
+                    life: 1.5,
+                });
+            }
         }
     }
 
     drawWaterDrops() {
-        for (const d of this.waterDrops) {
-            const alpha = Math.min(d.life, 1);
-            this.ctx.fillStyle = `rgba(100, 181, 246, ${alpha})`;
-            this.ctx.beginPath();
-            this.ctx.ellipse(d.x, d.y, d.size * 0.6, d.size, 0, 0, Math.PI * 2);
-            this.ctx.fill();
+        const ctx = this.ctx;
+        if (this.useWorker) {
+            const data = this.dropData;
+            const count = this.dropCount;
+            for (let i = 0; i < count; i++) {
+                const o = i * 6;
+                const x = data[o];
+                const y = data[o + 1];
+                const size = data[o + 4];
+                const life = data[o + 5];
+                const alpha = Math.min(life, 1);
+                ctx.fillStyle = `rgba(100, 181, 246, ${alpha})`;
+                ctx.beginPath();
+                ctx.ellipse(x, y, size * 0.6, size, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        } else {
+            const drops = this._fallbackDrops;
+            for (let i = 0; i < drops.length; i++) {
+                const d = drops[i];
+                const alpha = Math.min(d.life, 1);
+                ctx.fillStyle = `rgba(100, 181, 246, ${alpha})`;
+                ctx.beginPath();
+                ctx.ellipse(d.x, d.y, d.size * 0.6, d.size, 0, 0, Math.PI * 2);
+                ctx.fill();
+            }
         }
     }
 
