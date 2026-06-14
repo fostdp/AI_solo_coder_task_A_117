@@ -10,6 +10,7 @@ import (
 
 	"waterwheel-monitor/internal/config"
 	"waterwheel-monitor/internal/database"
+	"waterwheel-monitor/internal/metrics"
 	"waterwheel-monitor/internal/models"
 	"waterwheel-monitor/internal/pipeline"
 )
@@ -81,6 +82,7 @@ func (r *DTUReceiver) HandleReportTelemetry(c *gin.Context) {
 
 	select {
 	case r.chans.RawCh <- msg:
+		metrics.IncTelemetryReceived()
 	default:
 		log.Printf("[DTU Receiver] Warning: RawCh full, dropping telemetry for wheel %d", wheel.ID)
 	}
