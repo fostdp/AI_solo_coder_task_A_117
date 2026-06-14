@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -18,9 +19,12 @@ import (
 	"waterwheel-monitor/internal/dtu_receiver"
 	"waterwheel-monitor/internal/handlers"
 	"waterwheel-monitor/internal/hydraulic_model"
+	"waterwheel-monitor/internal/metrics"
 	"waterwheel-monitor/internal/models"
 	"waterwheel-monitor/internal/pipeline"
 	"waterwheel-monitor/internal/shape_optimizer"
+
+	"net/http/pprof"
 )
 
 func main() {
@@ -45,10 +49,10 @@ func main() {
 	defer chans.Close()
 
 	mqttCfg := &models.MQTTConfig{
-		BrokerURL: cfg.MQTTBroker,
-		ClientID:  cfg.MQTTClientID,
-		Username:  cfg.MQTTUsername,
-		Password:  cfg.MQTTPassword,
+		BrokerURL:   cfg.MQTTBroker,
+		ClientID:    cfg.MQTTClientID,
+		Username:    cfg.MQTTUsername,
+		Password:    cfg.MQTTPassword,
 		TopicPrefix: cfg.MQTTTopicPrefix,
 	}
 
@@ -65,9 +69,13 @@ func main() {
 	optimizer.Start(rootCtx)
 	alerter.Start(rootCtx)
 
+	go metricsCollector(rootCtx, chans, 5*time.Second)
+
 	h := handlers.NewV2(db, chans, hydraulic, optimizer, cfg.EfficiencyAlertThreshold)
 
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(metrics.PrometheusMiddleware())
 
 	r.Use(cors.New(cors.Config{
 		AllowAllOrigins:  true,
@@ -77,6 +85,23 @@ func main() {
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
+
+	debug := r.Group("/debug/pprof")
+	{
+		debug.GET("/", gin.WrapF(pprof.Index))
+		debug.GET("/cmdline", gin.WrapF(pprof.Cmdline))
+		debug.GET("/profile", gin.WrapF(pprof.Profile))
+		debug.GET("/symbol", gin.WrapF(pprof.Symbol))
+		debug.GET("/trace", gin.WrapF(pprof.Trace))
+		debug.GET("/allocs", gin.WrapH(pprof.Handler("allocs")))
+		debug.GET("/block", gin.WrapH(pprof.Handler("block")))
+		debug.GET("/goroutine", gin.WrapH(pprof.Handler("goroutine")))
+		debug.GET("/heap", gin.WrapH(pprof.Handler("heap")))
+		debug.GET("/mutex", gin.WrapH(pprof.Handler("mutex")))
+		debug.GET("/threadcreate", gin.WrapH(pprof.Handler("threadcreate")))
+	}
+
+	r.GET("/metrics", metrics.PrometheusHandler())
 
 	r.Static("/static", "../../frontend")
 	r.StaticFile("/", "../../frontend/index.html")
@@ -108,6 +133,8 @@ func main() {
 	go func() {
 		log.Printf("Server starting on port %s | Hydraulic workers:%d Optimizer workers:%d",
 			cfg.ServerPort, 2, 1)
+		log.Printf("Prometheus metrics available at :%s/metrics", cfg.ServerPort)
+		log.Printf("pprof available at :%s/debug/pprof/", cfg.ServerPort)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
 		}
@@ -130,4 +157,28 @@ func main() {
 	}
 
 	log.Println("Server exited cleanly")
+}
+
+func metricsCollector(ctx context.Context, chans *pipeline.Channels, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[Metrics Collector] Stopped")
+			return
+		case <-ticker.C:
+			metrics.SetChannelDepth("raw", len(chans.RawCh))
+			metrics.SetChannelDepth("enriched", len(chans.EnrichedCh))
+			metrics.SetChannelDepth("alert", len(chans.AlertCh))
+			metrics.SetChannelDepth("optimize_req", len(chans.OptimizeReqCh))
+		}
+	}
+}
+
+func mustAtoi(s string, fallback int) int {
+	if v, err := strconv.Atoi(s); err == nil {
+		return v
+	}
+	return fallback
 }
