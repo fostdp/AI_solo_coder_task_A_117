@@ -12,12 +12,15 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 
+	"waterwheel-monitor/internal/alarm_mqtt"
 	"waterwheel-monitor/internal/config"
 	"waterwheel-monitor/internal/database"
-	"waterwheel-monitor/internal/efficiency"
+	"waterwheel-monitor/internal/dtu_receiver"
 	"waterwheel-monitor/internal/handlers"
-	"waterwheel-monitor/internal/mqtt"
-	"waterwheel-monitor/internal/optimizer"
+	"waterwheel-monitor/internal/hydraulic_model"
+	"waterwheel-monitor/internal/models"
+	"waterwheel-monitor/internal/pipeline"
+	"waterwheel-monitor/internal/shape_optimizer"
 )
 
 func main() {
@@ -26,6 +29,11 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	hydraulicParams := config.DefaultHydraulicParams()
+	optimizerParams := config.DefaultOptimizerParams()
+	alarmParams := config.DefaultAlarmParams()
+	receiverParams := config.DefaultReceiverParams()
+
 	db, err := database.New(cfg)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
@@ -33,19 +41,31 @@ func main() {
 	defer db.Close()
 	log.Println("Database connected successfully")
 
-	effCalc := efficiency.NewCalculator()
-	ga := optimizer.NewGAOptimizer()
+	chans := pipeline.NewChannels(1024)
+	defer chans.Close()
 
-	var alertClient *mqtt.AlertClient
-	alertClient, err = mqtt.NewAlertClient(cfg)
-	if err != nil {
-		log.Printf("Warning: Failed to connect to MQTT broker (alerts will not be published): %v", err)
-		alertClient = nil
-	} else {
-		defer alertClient.Close()
+	mqttCfg := &models.MQTTConfig{
+		BrokerURL: cfg.MQTTBroker,
+		ClientID:  cfg.MQTTClientID,
+		Username:  cfg.MQTTUsername,
+		Password:  cfg.MQTTPassword,
+		TopicPrefix: cfg.MQTTTopicPrefix,
 	}
 
-	h := handlers.New(db, effCalc, ga, alertClient, cfg.EfficiencyAlertThreshold)
+	receiver := dtu_receiver.New(db, chans, receiverParams)
+	hydraulic := hydraulic_model.New(db, chans, hydraulicParams)
+	optimizer := shape_optimizer.New(db, chans, optimizerParams, hydraulicParams)
+	alerter := alarm_mqtt.New(db, chans, mqttCfg, alarmParams)
+
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
+	receiver.Start(rootCtx)
+	hydraulic.Start(rootCtx)
+	optimizer.Start(rootCtx)
+	alerter.Start(rootCtx)
+
+	h := handlers.NewV2(db, chans, hydraulic, optimizer, cfg.EfficiencyAlertThreshold)
 
 	r := gin.Default()
 
@@ -63,12 +83,12 @@ func main() {
 
 	api := r.Group("/api")
 	{
-		api.GET("/health", h.HealthCheck)
+		api.GET("/health", receiver.HandleHealth)
 
 		api.GET("/waterwheels", h.GetWaterwheels)
 		api.GET("/waterwheels/:id", h.GetWaterwheel)
 
-		api.POST("/telemetry", h.ReportTelemetry)
+		api.POST("/telemetry", receiver.HandleReportTelemetry)
 		api.GET("/waterwheels/:id/telemetry", h.GetTelemetry)
 		api.GET("/waterwheels/:id/telemetry/range", h.GetTelemetryRange)
 
@@ -76,7 +96,7 @@ func main() {
 
 		api.GET("/waterwheels/:id/alerts", h.GetAlerts)
 
-		api.POST("/waterwheels/:id/optimize", h.RunOptimization)
+		api.POST("/waterwheels/:id/optimize", h.RunOptimizationV2)
 		api.GET("/waterwheels/:id/optimizations", h.GetOptimizationResults)
 	}
 
@@ -86,7 +106,8 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Server starting on port %s", cfg.ServerPort)
+		log.Printf("Server starting on port %s | Hydraulic workers:%d Optimizer workers:%d",
+			cfg.ServerPort, 2, 1)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
 		}
@@ -95,7 +116,11 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("Shutting down server...")
+	log.Println("Shutting down modules...")
+
+	rootCancel()
+
+	time.Sleep(200 * time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -104,5 +129,5 @@ func main() {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
-	log.Println("Server exited")
+	log.Println("Server exited cleanly")
 }
