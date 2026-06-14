@@ -3,57 +3,81 @@ package models
 import "time"
 
 type Waterwheel struct {
-	ID              int       `json:"id"`
-	Name            string    `json:"name"`
-	Location        string    `json:"location"`
-	Diameter        float64   `json:"diameter"`
-	BucketCount     int       `json:"bucket_count"`
-	BucketCapacity  float64   `json:"bucket_capacity"`
-	MaxFlowRate     float64   `json:"max_flow_rate"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID             int64     `json:"id"`
+	Name           string    `json:"name"`
+	Location       string    `json:"location"`
+	Diameter       float64   `json:"diameter"`
+	BucketCount    int       `json:"bucket_count"`
+	BucketCapacity float64   `json:"bucket_capacity"`
+	MaxFlowRate    float64   `json:"max_flow_rate"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type TelemetryData struct {
-	Time                time.Time `json:"time"`
-	WaterwheelID        int       `json:"waterwheel_id"`
-	RotationSpeed       float64   `json:"rotation_speed"`
-	WaterLift           float64   `json:"water_lift"`
-	WaterLevelDrop      float64   `json:"water_level_drop"`
-	FlowVelocity        float64   `json:"flow_velocity"`
+	Time                 time.Time `json:"time"`
+	WaterwheelID         int64     `json:"waterwheel_id"`
+	RotationSpeed        float64   `json:"rotation_speed"`
+	WaterLift            float64   `json:"water_lift"`
+	WaterLevelDrop       float64   `json:"water_level_drop"`
+	FlowVelocity         float64   `json:"flow_velocity"`
 	MechanicalEfficiency *float64  `json:"mechanical_efficiency,omitempty"`
 	HydraulicEfficiency  *float64  `json:"hydraulic_efficiency,omitempty"`
 	Torque               *float64  `json:"torque,omitempty"`
 	PowerOutput          *float64  `json:"power_output,omitempty"`
 }
 
+const (
+	AlertTypeLowEfficiency = "low_efficiency"
+
+	SeverityWarning  AlertSeverity = "warning"
+	SeverityMajor    AlertSeverity = "major"
+	SeverityCritical AlertSeverity = "critical"
+)
+
+type AlertSeverity string
+
 type Alert struct {
-	ID              int       `json:"id"`
-	WaterwheelID    int       `json:"waterwheel_id"`
-	AlertType       string    `json:"alert_type"`
-	Message         string    `json:"message"`
-	Severity        string    `json:"severity"`
-	EfficiencyValue float64   `json:"efficiency_value"`
-	HistoricalAvg   float64   `json:"historical_avg"`
-	Time            time.Time `json:"time"`
-	Acknowledged    bool      `json:"acknowledged"`
+	ID                   int64         `json:"id"`
+	WaterwheelID         int64         `json:"waterwheel_id"`
+	WaterwheelName       string        `json:"waterwheel_name,omitempty"`
+	Time                 time.Time     `json:"time"`
+	Type                 string        `json:"type"`
+	Severity             AlertSeverity `json:"severity"`
+	Message              string        `json:"message"`
+	CurrentEfficiency    float64       `json:"current_efficiency"`
+	HistoricalEfficiency float64       `json:"historical_efficiency"`
+	Threshold            float64       `json:"threshold"`
+	RotationSpeed        float64       `json:"rotation_speed"`
+	WaterLift            float64       `json:"water_lift"`
+	WaterLevelDrop       float64       `json:"water_level_drop"`
+	FlowVelocity         float64       `json:"flow_velocity"`
+	Acknowledged         bool          `json:"acknowledged"`
 }
 
 type OptimizationResult struct {
-	ID                 int                    `json:"id"`
-	WaterwheelID       int                    `json:"waterwheel_id"`
-	BucketShapeParams  map[string]float64     `json:"bucket_shape_params"`
-	BucketAngle        float64                `json:"bucket_angle"`
-	OptimizedLiftRate  float64                `json:"optimized_lift_rate"`
-	OriginalLiftRate   float64                `json:"original_lift_rate"`
-	ImprovementPercent float64                `json:"improvement_percent"`
-	GenerationCount    int                    `json:"generation_count"`
-	FitnessHistory     []float64              `json:"fitness_history,omitempty"`
-	CreatedAt          time.Time              `json:"created_at"`
+	ID                   int       `json:"id"`
+	WaterwheelID         int64     `json:"waterwheel_id"`
+	Time                 time.Time `json:"time"`
+	OptimalBucketAngle   float64   `json:"optimal_bucket_angle"`
+	OptimalDepthRatio    float64   `json:"optimal_depth_ratio"`
+	OptimalWidthRatio    float64   `json:"optimal_width_ratio"`
+	PredictedLift        float64   `json:"predicted_lift_lph"`
+	PredictedImprovement float64   `json:"predicted_improvement_percent"`
+	Fitness              float64   `json:"fitness"`
+	Generations          int       `json:"generations"`
+}
+
+type MQTTConfig struct {
+	BrokerURL   string
+	ClientID    string
+	Username    string
+	Password    string
+	TopicPrefix string
 }
 
 type EfficiencyAnalysis struct {
-	WaterwheelID        int       `json:"waterwheel_id"`
+	WaterwheelID        int64     `json:"waterwheel_id"`
 	Time                time.Time `json:"time"`
 	RotationSpeed       float64   `json:"rotation_speed"`
 	InputPower          float64   `json:"input_power"`
