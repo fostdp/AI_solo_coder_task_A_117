@@ -8,10 +8,13 @@ import (
 )
 
 const (
-	WaterDensity     = 1000.0
-	Gravity          = 9.81
-	FrictionCoeff    = 0.08
-	BearingFriction  = 0.05
+	WaterDensity      = 1000.0
+	Gravity           = 9.81
+	FrictionCoeff     = 0.08
+	BearingFriction   = 0.05
+	FillTimeConstant  = 0.15
+	MaxFillEfficiency = 0.92
+	MinFillEfficiency = 0.15
 )
 
 type Calculator struct{}
@@ -62,16 +65,37 @@ func (c *Calculator) Analyze(wheel *models.Waterwheel, data *models.TelemetryDat
 
 func (c *Calculator) calculateHydraulicTorque(wheel *models.Waterwheel, data *models.TelemetryData, radius float64) float64 {
 	submergedBuckets := c.calculateSubmergedBuckets(wheel, data)
-	bucketForce := WaterDensity * Gravity * wheel.BucketCapacity * 0.7
+	fillEff := c.calculateDynamicFillEfficiency(wheel, data)
+
+	bucketForce := WaterDensity * Gravity * wheel.BucketCapacity * fillEff
 
 	effectiveRadius := radius * 0.85
 	impactForce := 0.5 * WaterDensity * data.FlowVelocity * data.FlowVelocity *
-		wheel.BucketCapacity * 0.5 / radius
+		wheel.BucketCapacity * fillEff * 0.5 / radius
 
 	torque := float64(submergedBuckets)*bucketForce*effectiveRadius +
 		float64(wheel.BucketCount/4)*impactForce*radius
 
 	return torque
+}
+
+func (c *Calculator) calculateDynamicFillEfficiency(wheel *models.Waterwheel, data *models.TelemetryData) float64 {
+	radius := wheel.Diameter / 2.0
+	angularVelocity := data.RotationSpeed * 2 * math.Pi / 60.0
+	if angularVelocity <= 0 {
+		return MaxFillEfficiency
+	}
+
+	submersionRatio := math.Min(1, data.WaterLevelDrop/wheel.Diameter)
+	submergedAngle := 2 * math.Asin(math.Sqrt(submersionRatio))
+	submergedAngle = math.Max(0.3, math.Min(math.Pi*0.8, submergedAngle))
+
+	immersionTime := submergedAngle / angularVelocity
+
+	fillEff := 1.0 - math.Exp(-immersionTime/FillTimeConstant)
+	fillEff = MinFillEfficiency + fillEff*(MaxFillEfficiency-MinFillEfficiency)
+
+	return fillEff
 }
 
 func (c *Calculator) calculateSubmergedBuckets(wheel *models.Waterwheel, data *models.TelemetryData) int {
@@ -103,10 +127,11 @@ func (c *Calculator) calculateLiftResistance(wheel *models.Waterwheel, data *mod
 }
 
 func (c *Calculator) calculateTheoreticalLift(wheel *models.Waterwheel, data *models.TelemetryData) float64 {
-	filledBuckets := float64(wheel.BucketCount) * 0.35
-	volumePerRotation := filledBuckets * wheel.BucketCapacity
-	liftPerMinute := volumePerRotation * data.RotationSpeed * 60.0
-	return math.Min(liftPerMinute, wheel.MaxFlowRate)
+	fillEff := c.calculateDynamicFillEfficiency(wheel, data)
+	activeBucketRatio := 0.38
+	volumePerRotation := float64(wheel.BucketCount) * activeBucketRatio * wheel.BucketCapacity * fillEff
+	liftPerHour := volumePerRotation * data.RotationSpeed * 60.0
+	return math.Min(liftPerHour, wheel.MaxFlowRate)
 }
 
 func (c *Calculator) EnrichTelemetry(wheel *models.Waterwheel, data *models.TelemetryData) {
