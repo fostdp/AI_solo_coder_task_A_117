@@ -12,6 +12,7 @@ import (
 
 	"waterwheel-monitor/internal/config"
 	"waterwheel-monitor/internal/database"
+	"waterwheel-monitor/internal/metrics"
 	"waterwheel-monitor/internal/models"
 	"waterwheel-monitor/internal/pipeline"
 )
@@ -122,7 +123,8 @@ func (a *AlertPusher) handleAlert(msg *pipeline.AlertMsg) {
 	}
 
 	a.markAlerted(wheel.ID)
-	log.Printf("[Alarm MQTT] Alerted wheel=%d eff=%.4f hist=%.4f", wheel.ID, msg.CurrentEff, msg.HistoricalAvg)
+	metrics.IncAlert(string(alert.Severity))
+	log.Printf("[Alarm MQTT] Alerted wheel=%d eff=%.4f hist=%.4f sev=%s", wheel.ID, msg.CurrentEff, msg.HistoricalAvg, alert.Severity)
 }
 
 func (a *AlertPusher) shouldAlert(wheelID int64) bool {
