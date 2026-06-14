@@ -2,11 +2,14 @@ package hydraulic_model
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math"
+	"time"
 
 	"waterwheel-monitor/internal/config"
 	"waterwheel-monitor/internal/database"
+	"waterwheel-monitor/internal/metrics"
 	"waterwheel-monitor/internal/models"
 	"waterwheel-monitor/internal/pipeline"
 )
@@ -51,7 +54,14 @@ func (hm *HydraulicModel) modelWorker(ctx context.Context, id int) {
 }
 
 func (hm *HydraulicModel) processMessage(msg *pipeline.RawTelemetryMsg) {
+	start := time.Now()
 	analysis := hm.Analyze(msg.Wheel, msg.Data)
+	metrics.ObserveModelDuration("analyze", time.Since(start))
+
+	wheelID := fmt.Sprintf("%d", msg.Wheel.ID)
+	metrics.SetWheelEfficiency(wheelID, "mechanical", analysis.MechanicalEfficiency)
+	metrics.SetWheelEfficiency(wheelID, "hydraulic", analysis.HydraulicEfficiency)
+	metrics.SetWheelEfficiency(wheelID, "overall", analysis.MechanicalEfficiency*analysis.HydraulicEfficiency)
 
 	dataCopy := *msg.Data
 	dataCopy.MechanicalEfficiency = &analysis.MechanicalEfficiency
